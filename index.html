@@ -1091,8 +1091,9 @@ const OCR = {
     const firstPrice = s => { const m = String(s || '').match(PRICE); return m ? toN(m[0]) : null; };
     const priceHere = (l, i) => { const v = firstPrice(l); if (v !== null) return v; const n = lines[i + 1]; return n && /^[^a-zа-яё]{0,4}-?\d/i.test(n) ? firstPrice(n) : null; };
     let cand = null, paid = null, change = null, payOpen = false;
+    const HG0 = { a: 'а', b: 'в', c: 'с', e: 'е', h: 'н', k: 'к', m: 'м', o: 'о', p: 'р', t: 'т', x: 'х', y: 'у' };
     for (let i = 0; i < lines.length; i++) {
-      const l = lines[i], lo = l.toLowerCase();
+      const l = lines[i], lo = l.toLowerCase().replace(/[abcehkmoptxy]/g, ch => HG0[ch] || ch).replace(/(?<=[а-я])0|0(?=[а-я])/g, 'о');
       const kw = lo.search(/итог|к оплате|всего к|total/);
       if (cand === null && kw >= 0 && !/цена|кол-?во/.test(lo)) {
         const v = firstPrice(l.slice(kw)) ?? priceHere('', i); // первая сумма ПОСЛЕ слова «итого», а не последняя в строке
@@ -1142,11 +1143,16 @@ const OCR = {
       if (Math.abs(r2(price * qty) - sum) > 0.02) { alt = r2(price * qty); price = r2(sum / (qty || 1)); } // OCR путает 8/6/3 — пока верим сумме строки
       out.items.push({ name: bad ? '' : nm.slice(0, 80), qty, price, sum, unread: bad || undefined, _alt: alt });
     };
+    // OCR часто печатает «Cдача», «Haличными» латиницей — для поиска служебных слов переводим двойники в кириллицу
+    const HG = { a: 'а', b: 'в', c: 'с', e: 'е', h: 'н', k: 'к', m: 'м', o: 'о', p: 'р', t: 'т', x: 'х', y: 'у', '0': 'о', '3': 'з' };
+    const kw = l => l.toLowerCase().replace(/[abcehkmoptxy03]/g, ch => HG[ch] || ch);
+    const PAY = /налич|сдач|безнал|банк|картой|оплат|получено|внесено|итог|к оплате/;
     let pending = '', stop = false;
     for (const l of lines) {
       if (stop) break;
-      if (/итог|к оплате/i.test(l) && out.items.length) { stop = true; continue; }
-      if (SKIP.test(l.toLowerCase())) { pending = ''; continue; }
+      const lk = kw(l);
+      if (PAY.test(lk) && out.items.length) { stop = true; continue; } // после итога/оплаты товаров не бывает
+      if (SKIP.test(l.toLowerCase()) || SKIP.test(lk)) { pending = ''; continue; }
       const by = l.match(BYL);
       if (by) {
         const same = cleanName(l.slice(0, by.index));
@@ -1197,7 +1203,7 @@ const OCR = {
 
 /* ============================== AI PARSER ============================== */
 const AI = {
-  defaults: { claude: 'claude-sonnet-5', openai: 'gpt-4o-mini', gemini: 'gemini-2.0-flash', compat: 'gpt-4o-mini' },
+  defaults: { claude: 'claude-sonnet-5', openai: 'gpt-4o-mini', gemini: 'gemini-2.5-flash', compat: 'gpt-4o-mini' },
   // «Другой сервис»: любой OpenAI-совместимый шлюз (в т.ч. сервисы, работающие без VPN). Базовый адрес вида https://…/v1
   oaiUrl: p => p === 'compat' ? String(S.settings.aiBase || '').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions' : 'https://api.openai.com/v1/chat/completions',
   claudeOn: () => !!(Bridge.sample && Bridge.vision && S.settings.useClaude !== false),
@@ -1239,8 +1245,7 @@ fiscal — для РФ fn/fd/fp; для РБ ui — «УИ» код под ит�
       if (data.error) throw new Error('Claude: ' + data.error);
       return data;
     }
-    if (!dataUrl && img) dataUrl = Img.canvas(img, 2000, { gray: false }).toDataURL('image/jpeg', 0.88);
-    return this.parseKey(dataUrl);
+    return this.parseKey(img);
   },
   sampleErr(e) {
     const c = e && e.code;
@@ -1260,53 +1265,88 @@ fiscal — для РФ fn/fd/fp; для РБ ui — «УИ» код под ит�
     if (this.keyOn()) { try { const r = await this.textKey(p); const m = r.match(/\[[\s\S]*\]/); return m ? JSON.parse(m[0]) : []; } catch (e) { return []; } }
     return [];
   },
-  async textKey(prompt) {
-    const { aiProvider: pv, aiKey: key } = S.settings, model = S.settings.aiModel || this.defaults[pv];
-    if (pv === 'claude') { const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify({ model, max_tokens: 2000, messages: [{ role: 'user', content: prompt }] }) }); const j = await r.json(); if (!r.ok) throw new Error(j?.error?.message); return j.content.map(c => c.text || '').join(''); }
-    if (pv === 'openai' || pv === 'compat') { const r = await fetch(this.oaiUrl(pv), { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + key }, body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }] }) }); const j = await r.json(); if (!r.ok) throw new Error(j?.error?.message); return j.choices[0].message.content; }
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }) }); const j = await r.json(); if (!r.ok) throw new Error(j?.error?.message); return j.candidates?.[0]?.content?.parts?.map(x => x.text).join('') || '';
+  textKey(prompt) { return this.callKey(prompt, []); },
+  // Фото → JPEG base64 (обзор кадра + увеличенные фрагменты полосы чека, как для Claude)
+  async imagesFor(img, max) {
+    const blobs = await Img.forAI(img, max);
+    return Promise.all(blobs.map(b => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1]); fr.onerror = rej; fr.readAsDataURL(b); })));
   },
-  async parseKey(dataUrl) {
-    const { aiProvider: p, aiKey: key } = S.settings;
-    const model = S.settings.aiModel || this.defaults[p];
-    const b64 = dataUrl.split(',')[1], mime = 'image/jpeg';
-    let text;
-    if (p === 'claude') {
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-        body: JSON.stringify({ model, max_tokens: 8000, messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: mime, data: b64 } }, { type: 'text', text: this.prompt() }] }] })
-      });
-      const j = await r.json(); if (!r.ok) throw new Error(j?.error?.message || 'Claude API: ' + r.status);
-      text = j.content.filter(c => c.type === 'text').map(c => c.text).join('');
-    } else if (p === 'openai' || p === 'compat') {
-      if (p === 'compat' && !/^https:\/\//.test(S.settings.aiBase || '')) throw new Error('укажите адрес сервиса (https://…/v1) в настройках');
-      const r = await fetch(this.oaiUrl(p), {
-        method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + key },
-        body: JSON.stringify({ model, ...(p === 'openai' ? { response_format: { type: 'json_object' } } : { max_tokens: 8000 }), messages: [{ role: 'user', content: [{ type: 'text', text: this.prompt() }, { type: 'image_url', image_url: { url: dataUrl } }] }] })
-      });
-      let j; try { j = await r.json(); } catch (e) { throw new Error('сервис вернул не JSON (код ' + r.status + ')'); }
-      if (!r.ok) throw new Error(j?.error?.message || 'API: ' + r.status);
-      const c = j.choices?.[0]?.message?.content; text = Array.isArray(c) ? c.map(x => x.text || '').join('') : (c || '');
-    } else if (p === 'gemini') {
-      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: [{ text: this.prompt() }, { inline_data: { mime_type: mime, data: b64 } }] }], generationConfig: { responseMimeType: 'application/json' } })
-      });
-      const j = await r.json(); if (!r.ok) throw new Error(j?.error?.message || 'Gemini API: ' + r.status);
-      text = j.candidates?.[0]?.content?.parts?.map(x => x.text).join('') || '';
-    } else throw new Error('ИИ-провайдер не выбран');
-    const clean = text.replace(/```json|```/g, '').trim();
+  async parseKey(img) {
+    if (!img) throw new Error('нет изображения');
+    const imgs = await this.imagesFor(img, S.settings.aiProvider === 'gemini' ? 4 : 3);
+    const extra = imgs.length > 1 ? `Тебе дано ${imgs.length} изображения: №1 — весь кадр целиком (для общей структуры и подсчёта строк), №2–${imgs.length} — увеличенные фрагменты этого же чека сверху вниз, соседние фрагменты немного перекрываются. Текст читай по фрагментам, но строки на стыке фрагментов не дублируй — сверяйся с №1.` : '';
+    const text = await this.callKey(this.prompt(extra), imgs, true);
+    const clean = String(text || '').replace(/```json|```/g, '').trim();
     const m = clean.match(/\{[\s\S]*\}/); if (!m) throw new Error('ИИ вернул неожиданный ответ');
-    const data = JSON.parse(m[0]);
+    let data; try { data = JSON.parse(m[0]); } catch (e) { throw new Error('ИИ вернул повреждённый ответ, попробуйте ещё раз'); }
     if (data.error) throw new Error('ИИ: ' + data.error);
     return data;
+  },
+  // Понятные сообщения вместо английских ошибок API
+  human(msg, status) {
+    const m = String(msg || '');
+    if (/location is not supported|not available in your country|unsupported_country|region/i.test(m)) return 'сервис не работает из вашей страны без VPN';
+    if (/API key not valid|API_KEY_INVALID|invalid api key|incorrect api key|invalid x-api-key|UNAUTHENTICATED/i.test(m) || status === 401) return 'ключ не подходит — проверьте его в настройках';
+    if (status === 429 || /quota|rate limit|RESOURCE_EXHAUSTED/i.test(m)) return 'исчерпан лимит запросов — подождите минуту (или закончилась бесплатная квота на сегодня)';
+    if (status === 403) return 'доступ запрещён: ' + m.slice(0, 140);
+    if (status >= 500) return 'сервер ИИ временно недоступен, попробуйте ещё раз';
+    return m.slice(0, 200) || ('ошибка ' + status);
+  },
+  gWork: null,
+  // Единый вызов к провайдеру по ключу: текст + (необязательно) картинки
+  async callKey(prompt, images = [], json = false) {
+    const { aiProvider: pv } = S.settings, key = String(S.settings.aiKey || '').trim();
+    if (!key) throw new Error('не указан ключ');
+    const model = S.settings.aiModel || this.defaults[pv];
+    const net = e => new Error('нет связи с сервисом ИИ' + (navigator.onLine ? ' (возможно, он заблокирован в вашей стране)' : ' — нет интернета'));
+    if (pv === 'claude') {
+      let r; try { r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify({ model, max_tokens: 8000, messages: [{ role: 'user', content: [...images.map(d => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: d } })), { type: 'text', text: prompt }] }] }) }); } catch (e) { throw net(e); }
+      const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(this.human(j?.error?.message, r.status));
+      return (j.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+    }
+    if (pv === 'openai' || pv === 'compat') {
+      if (pv === 'compat' && !/^https:\/\//.test(S.settings.aiBase || '')) throw new Error('укажите адрес сервиса (https://…/v1) в настройках');
+      let r; try { r = await fetch(this.oaiUrl(pv), { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + key }, body: JSON.stringify({ model, ...(pv === 'openai' && json ? { response_format: { type: 'json_object' } } : {}), max_tokens: 8000, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(d => ({ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + d } }))] }] }) }); } catch (e) { throw net(e); }
+      const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(this.human(j?.error?.message, r.status));
+      const c = j.choices?.[0]?.message?.content; return Array.isArray(c) ? c.map(x => x.text || '').join('') : (c || '');
+    }
+    if (pv === 'gemini') {
+      // Google выдаёт ключи двух видов (AI Studio «AIza…» и Vertex/Cloud «AQ.…») — пробуем оба адреса и несколько моделей, запоминаем рабочую пару
+      const models = S.settings.aiModel ? [S.settings.aiModel] : ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash'];
+      const hosts = [
+        m => `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent`,
+        m => `https://aiplatform.googleapis.com/v1/publishers/google/models/${encodeURIComponent(m)}:generateContent`,
+      ];
+      let pairs = []; hosts.forEach((h, hi) => models.forEach(m => pairs.push([hi, m])));
+      if (key.startsWith('AQ.')) pairs.sort((a, b) => b[0] - a[0]); // ключи «AQ.» чаще работают через Vertex
+      if (this.gWork && this.gWork.key === key) pairs = [[this.gWork.hi, this.gWork.m], ...pairs.filter(p => !(p[0] === this.gWork.hi && p[1] === this.gWork.m))];
+      const body = JSON.stringify({ contents: [{ role: 'user', parts: [...images.map(d => ({ inline_data: { mime_type: 'image/jpeg', data: d } })), { text: prompt }] }], generationConfig: { temperature: 0, maxOutputTokens: 8192, ...(json ? { responseMimeType: 'application/json' } : {}) } });
+      let lastErr = null, badHost = -1;
+      for (const [hi, m] of pairs) {
+        if (hi === badHost) continue;
+        let r; try { r = await fetch(hosts[hi](m) + '?key=' + encodeURIComponent(key), { method: 'POST', headers: { 'content-type': 'application/json' }, body }); }
+        catch (e) { lastErr = net(e); badHost = hi; continue; }
+        const j = await r.json().catch(() => ({}));
+        if (r.ok) {
+          this.gWork = { key, hi, m };
+          const t = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+          if (!t) throw new Error(j.promptFeedback?.blockReason ? 'Google отклонил запрос (' + j.promptFeedback.blockReason + ')' : 'ИИ вернул пустой ответ, попробуйте ещё раз');
+          return t;
+        }
+        const msg = j?.error?.message || ''; lastErr = new Error(this.human(msg, r.status));
+        if (r.status === 429) throw lastErr;                 // лимит — дальше пробовать бессмысленно
+        if (r.status === 404 || (r.status === 400 && /model/i.test(msg) && !/key/i.test(msg))) continue; // нет такой модели — следующая
+        badHost = hi;                                        // ключ/страна/доступ не подходят этому адресу — пробуем другой адрес
+      }
+      throw lastErr || new Error('не удалось обратиться к Gemini');
+    }
+    throw new Error('ИИ-провайдер не выбран');
   },
   async test() {
     const c = document.createElement('canvas'); c.width = 320; c.height = 200; const x = c.getContext('2d');
     x.fillStyle = '#fff'; x.fillRect(0, 0, 320, 200); x.fillStyle = '#000'; x.font = '16px monospace';
     ['ООО "ТЕСТ"', '01.09.2026 12:30', 'Хлеб 1 x 50.00 =50.00', 'Молоко 1 x 90.00 =90.00', 'ИТОГ =140.00'].forEach((t, i) => x.fillText(t, 14, 30 + i * 34));
-    return this.claudeOn() ? this.parse(c) : this.parseKey(c.toDataURL('image/jpeg', 0.9));
+    return this.parse(c);
   },
 };
 
@@ -2908,6 +2948,17 @@ const App = {
     Pin.watch();
     const n = new Date(); S.open.add('y' + n.getFullYear()); S.open.add('m' + D.toLocal(n).slice(0, 7));
     this.bind();
+    // Ссылка-настройка: …/chekbook/#ai=gemini&key=XXX — сохраняет ключ в памяти телефона и сразу стирает его из адреса
+    if (/^#(ai|key)=/.test(location.hash)) {
+      const q = new URLSearchParams(location.hash.slice(1)), k = (q.get('key') || '').trim(), pv = q.get('ai') || 'gemini';
+      history.replaceState(null, '', location.pathname + location.search + '#home');
+      if (k && ['gemini', 'claude', 'openai', 'compat'].includes(pv)) {
+        S.settings.aiProvider = pv; S.settings.aiKey = k; S.settings.aiModel = ''; if (q.get('base')) S.settings.aiBase = q.get('base');
+        await saveSettings();
+        setTimeout(() => UI.toast('ИИ-распознавание подключено. Проверяю ключ…', { icon: 'sparkles' }), 300);
+        setTimeout(async () => { try { await AI.test(); UI.toast('Готово: ИИ работает, можно снимать чеки', { icon: 'check' }); } catch (e) { UI.toast('Ключ сохранён, но проверка не прошла: ' + e.message, { sticky: true }); } }, 900);
+      }
+    }
     const v = location.hash.slice(1); this.nav(Views[v] ? v : 'home');
     // Zero-loss: просим браузер не очищать хранилище при нехватке места
     try { if (navigator.storage?.persist && !(await navigator.storage.persisted())) await navigator.storage.persist(); } catch (e) {}
