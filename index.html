@@ -1578,7 +1578,13 @@ const Views = {
       // «Можно тратить сегодня»: остаток бюджета до сегодняшнего дня, равномерно на оставшиеся дни, минус уже потраченное сегодня
       const perDay = (budget - (spent - spentToday)) / daysLeftIncl, left = perDay - spentToday;
       safeLine = left >= 0 ? `<div><span>Можно потратить сегодня</span><b>${money(left, { short: true })}</b></div>` : `<div><span>Сегодня сверх плана</span><b class="delta-up">${money(-left, { short: true })}</b></div>`;
-    } else safeLine = `<div><span>В среднем за день</span><b>${money(spent / now.getDate(), { short: true })}</b></div>`;
+    } else {
+      // Среднее считаем только по дням, когда приложением реально пользовались (а не с 1-го числа), и только когда есть хотя бы 3 дня
+      const first = S.receipts.reduce((m, r) => (r.datetime < m ? r.datetime : m), '9999');
+      const startDay = first < D.toLocal(mf) ? 1 : new Date(first).getDate();
+      const days = now.getDate() - startDay + 1;
+      safeLine = days >= 3 ? `<div><span>В среднем за день</span><b>${money(spent / days, { short: true })}</b></div>` : '';
+    }
     const tips = Insights.build(), byCat = Agg.byCat(month);
     const budgets = S.categories.filter(c => num(c.budget) > 0);
     const recent = [...S.receipts].sort((a, b) => b.datetime.localeCompare(a.datetime)).slice(0, 6);
@@ -2120,7 +2126,7 @@ const Editor = {
     const r = e.r, is = r2(r.items.reduce((a, i) => a + num(i.sum), 0)), t = r2(num(r.total)), diff = r2(t - is);
     const dup = Dup.find({ ...r, total: t || is });
     return `<div class="row between" style="font-size:13.5px"><span class="muted">Сумма позиций</span><b class="num">${money(is)}</b></div>
-      ${t && Math.abs(diff) > 0.009 ? `<div class="warn-box" style="margin-top:10px"><i data-lucide="triangle-alert"></i><div style="flex:1">Позиции не сходятся с итогом на <b>${money(diff)}</b>${diff < 0 ? ' — возможно, скидка' : ''}.<div class="row" style="margin-top:8px;gap:6px;flex-wrap:wrap"><button class="btn btn-sm" data-fix="adj">Добавить ${diff < 0 ? 'скидку' : 'корректировку'}</button><button class="btn btn-sm" data-fix="sum">Итог = ${money(is)}</button></div></div></div>` : ''}
+      ${t && Math.abs(diff) > 0.009 ? `<div class="warn-box" style="margin-top:10px"><i data-lucide="triangle-alert"></i><div style="flex:1">Итог чека ${money(t)}, а позиции дают ${money(is)}. ${diff < 0 ? 'Возможно, была скидка.' : 'Проверьте итог: возможно, прочиталась сумма, которую дали кассиру, — или не хватает позиции.'}<div class="row" style="margin-top:8px;gap:6px;flex-wrap:wrap"><button class="btn btn-sm btn-primary" data-fix="sum">Итог = ${money(is)}</button><button class="btn btn-sm" data-fix="adj">${diff < 0 ? 'Добавить скидку ' + money(diff) : 'Добавить позицию на ' + money(diff)}</button></div></div></div>` : ''}
       ${dup ? `<div class="warn-box" style="margin-top:10px"><i data-lucide="copy"></i><div>Похожий чек уже есть: ${esc(dup.store || 'без магазина')}, ${money(dup.total)}, ${D.fmtShort(dup.datetime)} ${D.time(dup.datetime)}.</div></div>` : ''}`;
   },
 
@@ -2248,7 +2254,7 @@ const Editor = {
     el.querySelector('#ed-sum').onclick = ev => {
       const b = ev.target.closest('[data-fix]'); if (!b) return;
       const is = r2(r.items.reduce((a, i) => a + num(i.sum), 0)), diff = r2(num(r.total) - is);
-      if (b.dataset.fix === 'adj') r.items.push(newItem(diff < 0 ? 'Скидка' : 'Корректировка', diff, mainCategory(r)));
+      if (b.dataset.fix === 'adj') r.items.push(newItem(diff < 0 ? 'Скидка' : '', diff, mainCategory(r)));
       else r.total = is;
       this.touch(e); this.render(e);
     };
@@ -2267,10 +2273,11 @@ const Editor = {
     if (!r.total) r.total = is;
     if (Math.abs(is - r.total) > 0.009) {
       const diff = r2(r.total - is);
-      const v = await UI.choice({ title: 'Суммы не сходятся', text: `Позиции — ${money(is)}, итог чека — ${money(r.total)}. Разница ${money(diff)}. Для точной аналитики сумма позиций должна совпадать с итогом.`,
-        options: [{ label: `Добавить ${diff < 0 ? 'скидку' : 'корректировку'} ${money(diff)}`, value: 'adj', cls: 'btn-primary' }, { label: `Считать итогом ${money(is)}`, value: 'sum' }, { label: 'Вернуться к правке', value: null }] });
+      // По умолчанию верим позициям: они прочитаны построчно, а «итог» OCR часто путает с суммой наличных
+      const v = await UI.choice({ title: 'Суммы не сходятся', text: `Позиции — ${money(is)}, итог чека — ${money(r.total)}. ${diff < 0 ? 'Похоже на скидку.' : 'Чаще всего это значит, что итог прочитан неверно (например, взята сумма, которую дали кассиру).'} Сверьтесь с бумажным чеком.`,
+        options: [{ label: `Потрачено ${money(is)} (по позициям)`, value: 'sum', cls: 'btn-primary' }, { label: diff < 0 ? `Добавить скидку ${money(diff)}` : `Потрачено ${money(r.total)} (добавить недостающую позицию)`, value: 'adj' }, { label: 'Вернуться к правке', value: null }] });
       if (!v) return;
-      if (v === 'adj') r.items.push(newItem(diff < 0 ? 'Скидка' : 'Корректировка', diff, mainCategory(r))); else r.total = is;
+      if (v === 'adj') r.items.push(newItem(diff < 0 ? 'Скидка' : 'Позиция без названия', diff, mainCategory(r))); else r.total = is;
     }
     r.store = String(r.store || '').trim();
     r.hasPhoto = !!e.photo || !!r.hasPhoto;
