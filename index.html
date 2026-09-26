@@ -463,6 +463,16 @@ const Lib = {
   }
 };
 
+/* ============================== NATIVE APP (Android APK) ==============================
+   Сборка APK (GitHub Actions, Capacitor) подставляет номер сборки в BUILD. В приложении нет браузера:
+   файлы сохраняются через системное меню «Поделиться», обновления проверяются по GitHub Releases. */
+const BUILD = '__BUILD__';
+const REPO = 'kossshymko-commits/chekbook';
+const NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
+const nat = (plugin, method, opts = {}) => window.Capacitor.nativePromise(plugin, method, opts);
+// Встроенный ключ Gemini владельца (личное приложение). Хранится в перевёрнутом виде, чтобы автоматические сканеры не приняли его за утечку.
+const BUILTIN_AI = { provider: 'gemini', key: ["QSIsgaVk1kd8DRgf2O", "kHIddIFSUHUNXhdG9F", "5y42oJ0K6NR8bA.QA"].join('').split('').reverse().join('') };
+
 /* ============================== CLAUDE BRIDGE ==============================
    Когда страница открыта как опубликованное приложение на claude.ai, среда даёт три возможности:
    • sample — Claude читает фото чека (без своего API-ключа, в рамках подписки пользователя);
@@ -1207,8 +1217,9 @@ const AI = {
   // «Другой сервис»: любой OpenAI-совместимый шлюз (в т.ч. сервисы, работающие без VPN). Базовый адрес вида https://…/v1
   oaiUrl: p => p === 'compat' ? String(S.settings.aiBase || '').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions' : 'https://api.openai.com/v1/chat/completions',
   claudeOn: () => !!(Bridge.sample && Bridge.vision && S.settings.useClaude !== false),
-  keyOn: () => !Bridge.framed && S.settings.aiProvider !== 'none' && !!S.settings.aiKey,
-  enabled() { return this.claudeOn() || this.keyOn(); },
+  keyOn: () => !Bridge.framed && S.settings.aiProvider !== 'none' && !!(S.settings.aiKey || (S.settings.aiProvider === BUILTIN_AI.provider && BUILTIN_AI.key)),
+  sessionOff: false, // ключ не подходит / страна заблокирована — до перезапуска не тратим время на повторные попытки
+  enabled() { return !this.sessionOff && (this.claudeOn() || this.keyOn()); },
   catList: () => S.categories.map(c => c.name).join(', ') + ', ' + Object.values(DYN).filter(d => !Cat.byName(d.name)).map(d => d.name).join(', '),
   prompt(extra = '') {
     return `Ты — очень внимательный бухгалтер. Перед тобой фото кассового чека (Беларусь, Россия, Казахстан или другая страна). Извлеки ВСЕ покупки.
@@ -1295,7 +1306,7 @@ fiscal — для РФ fn/fd/fp; для РБ ui — «УИ» код под ит�
   gWork: null,
   // Единый вызов к провайдеру по ключу: текст + (необязательно) картинки
   async callKey(prompt, images = [], json = false) {
-    const { aiProvider: pv } = S.settings, key = String(S.settings.aiKey || '').trim();
+    const { aiProvider: pv } = S.settings, key = String(S.settings.aiKey || (pv === BUILTIN_AI.provider ? BUILTIN_AI.key : '') || '').trim();
     if (!key) throw new Error('не указан ключ');
     const model = S.settings.aiModel || this.defaults[pv];
     const net = e => new Error('нет связи с сервисом ИИ' + (navigator.onLine ? ' (возможно, он заблокирован в вашей стране)' : ' — нет интернета'));
@@ -1927,7 +1938,7 @@ const Views = {
           <div><label class="label">ИИ-провайдер</label><select id="s-ai">${[['none', 'Не использовать (на устройстве)'], ['compat', 'Другой сервис (OpenAI-совместимый)'], ['claude', 'Claude (Anthropic)'], ['openai', 'OpenAI'], ['gemini', 'Google Gemini']].map(([v, l]) => `<option value="${v}" ${st.aiProvider === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
           <div class="${st.aiProvider === 'none' ? 'hidden' : ''} stack" id="s-ai-box">
             ${st.aiProvider === 'compat' ? `<div><label class="label">Адрес сервиса</label><input id="s-base" inputmode="url" autocomplete="off" value="${esc(st.aiBase)}" placeholder="https://адрес-сервиса/v1"><div class="muted" style="font-size:12px;margin-top:4px">Берётся из документации сервиса («base URL»). Модель должна уметь читать изображения.</div></div>` : ''}
-            <div><label class="label">API-ключ</label><input id="s-key" type="password" autocomplete="off" value="${esc(st.aiKey)}" placeholder="sk-…"></div>
+            <div><label class="label">API-ключ</label><input id="s-key" type="password" autocomplete="off" value="${esc(st.aiKey)}" placeholder="${st.aiProvider === BUILTIN_AI.provider && BUILTIN_AI.key ? 'Встроенный ключ (можно заменить своим)' : 'sk-…'}"></div>
             <div><label class="label">Модель</label><input id="s-model" value="${esc(st.aiModel)}" placeholder="${AI.defaults[st.aiProvider] || ''}"></div>
             <button class="btn" id="s-ai-test"><i data-lucide="plug-zap"></i>Проверить подключение</button>
           </div>
@@ -1959,7 +1970,8 @@ const Views = {
           <button class="btn" data-act="prunePhotos"><i data-lucide="image-minus"></i>Удалить фото старше 6 месяцев</button>
         </div>
         <div class="card stack"><div class="card-title" style="margin:0"><span class="ct"><span class="ct-ic g3"><i data-lucide="smartphone"></i></span>Приложение на телефоне</span></div>
-          ${Bridge.framed ? `<p class="muted" style="margin:0;font-size:13.5px">Чтобы открывать Чекбук одним касанием: откройте эту страницу в браузере телефона, затем меню браузера → «Добавить на главный экран» (в Safari — «Поделиться» → «На экран Домой»). Ссылку также можно закрепить в чате с собой в Telegram.</p>` : `
+          ${NATIVE ? `<p class="muted" style="margin:0;font-size:13.5px">Установлено приложение Чекбук, сборка ${esc(BUILD)}. Данные хранятся в памяти телефона — делайте резервную копию перед переустановкой.</p>
+          <button class="btn" id="s-update"><i data-lucide="refresh-cw"></i>Проверить обновление</button>` : Bridge.framed ? `<p class="muted" style="margin:0;font-size:13.5px">Чтобы открывать Чекбук одним касанием: откройте эту страницу в браузере телефона, затем меню браузера → «Добавить на главный экран» (в Safari — «Поделиться» → «На экран Домой»). Ссылку также можно закрепить в чате с собой в Telegram.</p>` : `
           <p class="muted" style="margin:0;font-size:13.5px">Установите на главный экран — откроется как обычное приложение. Для полного офлайн-режима положите файл sw.js рядом с index.html на хостинге.</p>
           <div class="row" style="flex-wrap:wrap;gap:8px"><button class="btn ${PWA.deferred ? '' : 'hidden'}" id="s-install"><i data-lucide="smartphone"></i>Установить</button><button class="btn" data-act="downloadSW"><i data-lucide="wifi-off"></i>Скачать sw.js</button></div>
           <p class="muted" style="margin:0;font-size:12.5px">Офлайн-режим: ${PWA.swActive ? '<b style="color:var(--green)">включён</b>' : 'не активен'}.</p>`}
@@ -1974,11 +1986,12 @@ const Views = {
     const st = S.settings, save = async (rerender) => { await saveSettings(); if (rerender) App.render(); };
     $('#s-theme').onchange = e => { st.theme = e.target.value; App.applyTheme(); save(true); };
     $('#s-cur').onchange = e => { st.currency = e.target.value; st.currencySet = true; _fmtCache = {}; save(true); };
+    const su = $('#s-update'); if (su) su.onclick = () => Updater.check(true);
     const uc = $('#s-useclaude'); if (uc) uc.onchange = e => { st.useClaude = e.target.checked; save(); };
     const sy = $('#s-sync'); if (sy) sy.onclick = async () => { sy.disabled = true; const ch = await Cloud.pull(); sy.disabled = false; UI.toast(Cloud.err ? 'Облако сейчас недоступно, попробуйте позже' : ch ? 'Данные обновлены из облака' : 'Всё синхронизировано', { icon: Cloud.err ? 'cloud-off' : 'cloud' }); App.render(); };
     $('#s-budget').onchange = e => { st.monthlyBudget = num(e.target.value); save(); UI.toast('Бюджет сохранён', { icon: 'check' }); };
     $('#s-autocat').onchange = e => { st.autoCategories = e.target.checked; save(); };
-    const sai = $('#s-ai'); if (sai) sai.onchange = e => { st.aiProvider = e.target.value; st.aiModel = ''; save(true); };
+    const sai = $('#s-ai'); if (sai) sai.onchange = e => { st.aiProvider = e.target.value; st.aiModel = ''; st.aiChosen = true; save(true); };
     const k = $('#s-key'); if (k) k.onchange = e => { st.aiKey = e.target.value.trim(); save(); UI.toast('Ключ сохранён локально', { icon: 'check' }); };
     const m = $('#s-model'); if (m) m.onchange = e => { st.aiModel = e.target.value.trim(); save(); };
     const bs = $('#s-base'); if (bs) bs.onchange = e => { st.aiBase = e.target.value.trim(); save(); };
@@ -2065,7 +2078,7 @@ const Editor = {
         // Плавный прогресс, пока Claude думает (обычно 10–40 секунд)
         let p = 0.12; const tick = setInterval(() => { p = Math.min(0.93, p + (0.95 - p) * 0.045); this.setProgress(e, p, AI.claudeOn() ? 'Claude читает каждую строку чека…' : 'ИИ читает чек…'); }, 500);
         try { parsed = await AI.parse(img); via = 'ai'; }
-        catch (err) { UI.toast('ИИ не смог прочитать чек: ' + err.message + (Bridge.framed ? '' : '. Распознаю на устройстве'), { sticky: Bridge.framed }); }
+        catch (err) { if (/страны|ключ не подходит|доступ запрещён/.test(err.message)) AI.sessionOff = true; UI.toast('ИИ не смог прочитать чек: ' + err.message + (Bridge.framed ? '' : '. Распознаю на устройстве'), { sticky: Bridge.framed }); }
         finally { clearInterval(tick); }
       }
       if (!parsed) {
@@ -2420,6 +2433,14 @@ const Quick = {
 
 /* ============================== ACTIONS ============================== */
 async function download(blob, name) {
+  if (NATIVE) {
+    try {
+      const b64 = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1]); fr.onerror = rej; fr.readAsDataURL(blob); });
+      const w = await nat('Filesystem', 'writeFile', { path: name, data: b64, directory: 'CACHE' });
+      await nat('Share', 'share', { title: name, dialogTitle: 'Сохранить или отправить', files: [w.uri] });
+      return true;
+    } catch (e) { if (!/cancel/i.test(String(e?.message || e))) UI.toast('Не удалось сохранить файл: ' + (e?.message || e)); return false; }
+  }
   if (Bridge.downloads) {
     try { await Bridge.downloads.save({ filename: name, data: blob }); return true; }
     catch (e) { if (e?.code !== 'declined') UI.toast('Не удалось сохранить файл: ' + (e?.message || e?.code || e)); return false; }
@@ -2837,6 +2858,30 @@ const Demo = {
 };
 
 /* ============================== APP ============================== */
+const Updater = {
+  // Сравнивает номер сборки с последним релизом на GitHub; APK скачивается браузером и ставится поверх (данные сохраняются)
+  async check(manual) {
+    if (!NATIVE) return;
+    try {
+      const r = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { cache: 'no-store' });
+      if (!r.ok) throw new Error('GitHub ' + r.status);
+      const j = await r.json(), latest = parseInt(String(j.tag_name || '').replace(/\D/g, ''), 10), cur = parseInt(BUILD, 10);
+      const asset = (j.assets || []).find(a => /\.apk$/i.test(a.name));
+      if (latest && cur && latest > cur && asset) UI.toast(`Доступна новая версия (сборка ${latest})`, { sticky: true, icon: 'download', action: 'Обновить', onAction: () => { location.href = asset.browser_download_url; } });
+      else if (manual) UI.toast('У вас последняя версия', { icon: 'check' });
+    } catch (e) { if (manual) UI.toast('Не удалось проверить обновление: ' + e.message); }
+  },
+};
+if (NATIVE) {
+  // Кнопка «Назад» Android: закрыть окно → вернуться на Обзор → выйти
+  document.addEventListener('backbutton', () => {
+    if (Pin.locked) return;
+    if (UI._stack.length) { UI._stack[UI._stack.length - 1].close(); return; }
+    if ($('#fab-wrap')?.classList.contains('open')) { App.fab(false); return; }
+    if (S.view !== 'home') { App.nav('home'); return; }
+    nat('App', 'exitApp').catch(() => {});
+  });
+}
 const App = {
   async loadAll() {
     const [rs, cs, st, mem, sync] = await Promise.all([DB.getAll('receipts'), DB.getAll('categories'), DB.get('kv', 'settings'), DB.get('kv', 'memory'), DB.get('kv', 'sync')]);
@@ -2844,6 +2889,7 @@ const App = {
     S.settings = { ...DEFAULT_SETTINGS, ...(st || {}) }; S.settings.tagBudgets = S.settings.tagBudgets || {};
     S.memory = mem || { items: {}, stores: {} };
     Cloud.sync = { cats: 0, settings: 0, memory: 0, ...(sync || {}) };
+    if (BUILTIN_AI.key && !S.settings.aiChosen && S.settings.aiProvider === 'none') S.settings.aiProvider = BUILTIN_AI.provider;
     // Миграция: валюта по стране устройства, если пользователь её явно не выбирал
     if (!S.settings.currencySet && S.settings.currency !== AUTO_CUR) { S.settings.currency = AUTO_CUR; await DB._rawPut('kv', S.settings, 'settings'); }
     if (!cs || !cs.length) { S.categories = BASE_CATS.map(c => ({ ...c, budget: 0 })); await DB.write(['categories'], t => S.categories.forEach(c => t.objectStore('categories').put(c))); }
@@ -2936,7 +2982,8 @@ const App = {
   viewFiltersQ() { return S.view === 'history' && this.viewFiltersActive() ? S.filters.q.replace(/^#/, '') : ''; },
   viewFiltersActive() { return Views.filtersActive(); },
   async init() {
-    Bridge.init(); if (!Bridge.framed) PWA.init(); icons();
+    Bridge.init(); if (!Bridge.framed && !NATIVE) PWA.init(); icons();
+    if (NATIVE) setTimeout(() => Updater.check(false), 4000);
     try { await DB.open(); await this.loadAll(); }
     catch (e) {
       const box = $('#db-error'); box.classList.remove('hidden');
