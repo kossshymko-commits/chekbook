@@ -432,8 +432,10 @@ const D = {
 let _fmtCache = {};
 function money(v, opts = {}) {
   const cur = S.settings.currency || 'RUB';
-  const key = cur + (opts.short ? 's' : '');
-  if (!_fmtCache[key]) _fmtCache[key] = (() => { const o = { style: 'currency', currency: cur, minimumFractionDigits: opts.short ? 0 : 2, maximumFractionDigits: opts.short ? 0 : 2 }; try { return new Intl.NumberFormat('ru-RU', { ...o, currencyDisplay: 'narrowSymbol' }); } catch (e) { return new Intl.NumberFormat('ru-RU', o); } })();
+  // Никакого округления до рублей: копейки показываем всегда, кроме ровных сумм в кратком виде (44 000 р.)
+  const whole = Math.abs(r2(v) - Math.round(r2(v))) < 0.001;
+  const key = cur + (opts.short && whole ? 's' : '');
+  if (!_fmtCache[key]) _fmtCache[key] = (() => { const o = { style: 'currency', currency: cur, minimumFractionDigits: opts.short && whole ? 0 : 2, maximumFractionDigits: opts.short && whole ? 0 : 2 }; try { return new Intl.NumberFormat('ru-RU', { ...o, currencyDisplay: 'narrowSymbol' }); } catch (e) { return new Intl.NumberFormat('ru-RU', o); } })();
   return _fmtCache[key].format(r2(v));
 }
 const pct = (a, b) => b ? Math.round((a / b) * 100) : 0;
@@ -1085,9 +1087,27 @@ const OCR = {
     // Итог
     const PRICE = /(-?\d{1,3}(?:[ \u00a0]?\d{3})*[.,]\d{2})(?!\d)/g;
     const toN = s => num(s.replace(/[ \u00a0]/g, ''));
-    for (const l of lines) {
-      if (/(итог|итого|к оплате|всего к|total)/i.test(l)) { const m = l.match(PRICE); if (m) { out.total = toN(m[m.length - 1]); break; } }
+    // Итог = сумма покупок. НЕ путать с тем, сколько дали кассиру («Наличными 5.00») и сдачей («Сдача 0.41»).
+    const firstPrice = s => { const m = String(s || '').match(PRICE); return m ? toN(m[0]) : null; };
+    const priceHere = (l, i) => { const v = firstPrice(l); if (v !== null) return v; const n = lines[i + 1]; return n && /^[^a-zа-яё]{0,4}-?\d/i.test(n) ? firstPrice(n) : null; };
+    let cand = null, paid = null, change = null, payOpen = false;
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i], lo = l.toLowerCase();
+      const kw = lo.search(/итог|к оплате|всего к|total/);
+      if (cand === null && kw >= 0 && !/цена|кол-?во/.test(lo)) {
+        const v = firstPrice(l.slice(kw)) ?? priceHere('', i); // первая сумма ПОСЛЕ слова «итого», а не последняя в строке
+        if (v !== null) { cand = v; payOpen = true; continue; }
+      }
+      if (!payOpen) continue;
+      if (/сдач/.test(lo)) { const v = priceHere(l, i); if (v !== null) change = v; payOpen = false; continue; }
+      if (/кассир|терминал|карт-?чек|сумма операц/.test(lo)) { payOpen = false; continue; }
+      if (/налич|получено|внесено|оплачено|безнал|карт|банк/.test(lo)) { const v = priceHere(l, i); if (v !== null) paid = r2((paid || 0) + v); }
     }
+    const byChange = paid !== null && change !== null ? r2(paid - change) : null;
+    // Если «итог» совпал с суммой, которую дали кассиру, а сдача есть — итог = внесено − сдача
+    if (cand !== null && byChange !== null && Math.abs(cand - byChange) > 0.009 && Math.abs(cand - paid) < 0.009) cand = byChange;
+    out.total = cand ?? byChange ?? null;
+    out._pay = { paid, change, byChange };
 
     // Позиции
     const SKIP = cyr(/(итог|всего|к оплате|налич|безнал|карт[аоы]|сдач|ндс|\bфн\b|\bфд\b|\bфп\b|ккт|инн|унп|смена|кассир|чек\s*№|приход|сайт|спасибо|тел\.?|адрес|бонус|оплат|получено|сно|www|http|рн |зн |скидка на чек|округлен|эквайр|терминал|подпись|одобрено|код авт|mastercard|visa|мир\b|сумма операц|банк|rrn|карт-чек|платежн|документ|n док|цена кол|\bуи\b|касса)/i);
@@ -1165,7 +1185,12 @@ const OCR = {
       else if (cand.length > 1 && Math.abs(r2(cand.reduce((a, i) => a + i._alt - i.sum, 0)) - diffT()) < 0.011) cand.forEach(i => { i.sum = i._alt; i.price = r2(i.sum / (i.qty || 1)); });
     }
     out.items.forEach(i => delete i._alt);
-    if (!out.total && out.items.length) out.total = r2(out.items.reduce((a, i) => a + i.sum, 0));
+    // Итог прочитан как «внесённые» деньги (сдачу не распознали), а позиции прочитаны полностью и дают меньше — верим позициям
+    const itemsSum = r2(out.items.reduce((a, i) => a + i.sum, 0)), pay = out._pay || {};
+    if (out.items.length && pay.byChange !== null && pay.byChange !== undefined && Math.abs(itemsSum - pay.byChange) < 0.01) out.total = pay.byChange;
+    else if (out.items.length && pay.paid && out.total && Math.abs(out.total - pay.paid) < 0.01 && itemsSum < out.total - 0.009 && !out.items.some(i => i.unread)) out.total = itemsSum;
+    delete out._pay;
+    if (!out.total && out.items.length) out.total = itemsSum;
     return out;
   },
 };
@@ -1188,6 +1213,7 @@ ${extra}
 • Каждая напечатанная строка — отдельная позиция, даже если товар повторяется 5 раз подряд. НЕ объединяй и НЕ пропускай повторы.
 • Строки скидок — отдельной позицией с отрицательной суммой (name: «Скидка …»).
 • НЕ являются товарами: «ИТОГ/ИТОГО К ОПЛАТЕ», «Банк. пл. картой», «Наличными», «Сдача», «Сумма операции», RRN, терминал, карт-чек, кассир, УНП/ИНН, адрес.
+total — это ИТОГ / ИТОГО К ОПЛАТЕ (стоимость покупок), с копейками, без округления. Это НЕ сумма, которую покупатель дал кассиру («Наличными 5.00»), и сдачу не прибавляй и не вычитай. Для контроля верни paid (сколько внесено всего) и change (сдача), если они напечатаны.
 Проверка: сумма всех sum должна равняться ИТОГУ К ОПЛАТЕ. Если не сходится — перечитай строки и найди пропущенные или лишние.
 
 Поле name — понятное человеку название: убери цифровой код/артикул в начале, раскрой очевидные сокращения (д/к → для кошек, д/с → для собак, цб → цыплёнок-бройлер, п/ст → пластиковый стакан и т.п.), сохрани бренд в кавычках и вес/объём. Пример: «1213279 Корм д/к "WHISKAS"(кур/инд, паштет)75г» → «Корм для кошек Whiskas, курица/индейка, паштет 75 г».
@@ -1198,7 +1224,7 @@ currency — код валюты ISO по стране чека (Беларус�
 fiscal — для РФ fn/fd/fp; для РБ ui — «УИ» код под итогом, если виден.
 
 Ответь ТОЛЬКО JSON без пояснений:
-{"store":"","address":"","datetime":"YYYY-MM-DDTHH:mm","currency":"BYN","total":0,"items":[{"name":"","qty":1,"price":0,"sum":0,"category":""}],"fiscal":{"fn":"","fd":"","fp":"","ui":""}}
+{"store":"","address":"","datetime":"YYYY-MM-DDTHH:mm","currency":"BYN","total":0,"paid":0,"change":0,"items":[{"name":"","qty":1,"price":0,"sum":0,"category":""}],"fiscal":{"fn":"","fd":"","fp":"","ui":""}}
 Числа — с точкой. Если на фото нет чека или он совсем нечитаем — верни {"error":"коротко почему"}.`;
   },
   // Главный вход: img — загруженное изображение (ImageBitmap/Image), dataUrl — запасной вариант для ключевых провайдеров
@@ -2049,7 +2075,13 @@ const Editor = {
       for (let k = 0; k < weak.length; k++) { const id = ans[k] ? await Cat.fromName(ans[k], created) : null; if (id) weak[k].categoryId = id; }
     }
     weak.forEach(i => { if (!i.categoryId) { i.categoryId = Cat.fallback(r.store); i.weak = true; } });
-    r.total = r2(fq?.total || num(p.total) || items.reduce((a, i) => a + i.sum, 0));
+    const itemsSum = r2(items.reduce((a, i) => a + i.sum, 0));
+    let total = num(p.total);
+    const paid = num(p.paid), change = num(p.change);
+    // Защита от «итог = сколько дали кассиру»: внесено − сдача, либо точная сумма позиций
+    if (total && change > 0 && paid && Math.abs(total - paid) < 0.01) total = r2(paid - change);
+    if (total && items.length && Math.abs(total - itemsSum) > 0.009 && paid && Math.abs(total - paid) < 0.01 && itemsSum < total) total = itemsSum;
+    r.total = r2(fq?.total || total || itemsSum);
     if (!items.length && r.total) items.push(newItem('Покупка', r.total, Cat.storeHint(r.store)?.catId || Cat.fallback(r.store)));
     r.items = items;
     if (!r.tags.length) { const h = Cat.storeHint(r.store); if (h?.tags?.length) r.tags = [...h.tags]; }
