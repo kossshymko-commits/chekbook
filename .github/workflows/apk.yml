@@ -1,0 +1,101 @@
+# Чекбук — автоматическая сборка Android-приложения (APK).
+# Запускается сама при каждой загрузке нового index.html. Готовый APK появляется в разделе Releases:
+# https://github.com/kossshymko-commits/chekbook/releases/latest/download/chekbook.apk
+name: Сборка APK
+
+on:
+  push:
+    branches: [main]
+    paths: ['index.html', 'icon-512.png', 'icon-maskable-512.png', '.github/workflows/apk.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Подготовка проекта
+        run: |
+          set -e
+          mkdir -p build/www/lib
+          cd build
+          npm init -y > /dev/null
+          npm i --no-audit --no-fund @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/filesystem@6 @capacitor/share@6 @capacitor/app@6
+          cp ../index.html ../manifest.webmanifest ../icon-192.png ../icon-512.png www/
+          sed -i "s/__BUILD__/${{ github.run_number }}/" www/index.html
+          # Библиотеки кладём внутрь приложения — работает без интернета
+          node -e '
+            const fs = require("fs"), { execSync } = require("child_process");
+            let s = fs.readFileSync("www/index.html", "utf8"); let n = 0;
+            const urls = [...new Set((s.match(/https:\/\/(cdn\.jsdelivr\.net\/npm\/[^"\x27\x60\s)]+|cdn\.tailwindcss\.com)/g) || []))].filter(u => /tailwindcss\.com$|\.js$/.test(u)).sort((a, b) => b.length - a.length);
+            for (const u of urls) {
+              const f = "lib/" + (++n) + ".js";
+              try { execSync("curl -fsSL --retry 3 -o www/" + f + " \"" + u + "\""); s = s.split(u).join(f); console.log("ok", u); }
+              catch (e) { console.log("skip", u); }
+            }
+            fs.writeFileSync("www/index.html", s);
+          '
+          cat > capacitor.config.json <<'JSON'
+          { "appId": "by.chekbook.app", "appName": "Чекбук", "webDir": "www" }
+          JSON
+          npx cap add android
+          npx cap sync android
+
+      - name: Иконки, разрешения, версия
+        run: |
+          set -e
+          cd build/android/app
+          which convert || (sudo apt-get update && sudo apt-get install -y imagemagick)
+          M=src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n    <application#' $M
+          R=src/main/res
+          rm -rf $R/mipmap-anydpi-v26
+          for p in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+            d=${p%%:*}; s=${p##*:}
+            mkdir -p $R/mipmap-$d
+            convert ../../../icon-512.png -resize ${s}x${s} $R/mipmap-$d/ic_launcher.png
+            cp $R/mipmap-$d/ic_launcher.png $R/mipmap-$d/ic_launcher_round.png
+            convert ../../../icon-maskable-512.png -resize $((s*9/4))x$((s*9/4)) $R/mipmap-$d/ic_launcher_foreground.png || true
+          done
+          for f in $(find $R -name 'splash.png'); do
+            W=$(identify -format '%w' $f); H=$(identify -format '%h' $f); I=$(( (W<H?W:H)/3 ))
+            convert -size ${W}x${H} xc:'#EEF1F6' \( ../../../icon-512.png -resize ${I}x${I} \) -gravity center -composite $f
+          done
+          sed -i "s/versionCode [0-9]*/versionCode ${{ github.run_number }}/; s/versionName \"[^\"]*\"/versionName \"1.${{ github.run_number }}\"/" build.gradle
+          grep -n "versionCode\|versionName" build.gradle
+
+      - name: Сборка
+        run: |
+          set -e
+          mkdir -p ~/.android
+          echo "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" | base64 -d > ~/.android/debug.keystore
+          cd build/android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk ../../chekbook.apk
+
+      - name: Публикация
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: b${{ github.run_number }}
+          name: Чекбук, сборка ${{ github.run_number }}
+          body: Установите chekbook.apk на телефон. Обновление ставится поверх, данные сохраняются.
+          files: chekbook.apk
+          make_latest: true
