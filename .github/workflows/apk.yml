@@ -64,7 +64,9 @@ jobs:
           cd build/android/app
           which convert || (sudo apt-get update && sudo apt-get install -y imagemagick)
           M=src/main/AndroidManifest.xml
-          sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n    <application#' $M
+          sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n    <queries><intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent><intent><action android:name="android.intent.action.GET_CONTENT" /><data android:mimeType="image/*" /></intent></queries>\n    <application#' $M
+          grep -q "IMAGE_CAPTURE" $M
+          grep -q "fileprovider" $M || echo "WARN: no fileprovider" 
           R=src/main/res
           rm -rf $R/mipmap-anydpi-v26
           for p in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
