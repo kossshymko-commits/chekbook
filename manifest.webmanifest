@@ -1,0 +1,37 @@
+{
+ "name": "Чекбук — контроль расходов",
+ "short_name": "Чекбук",
+ "description": "Учёт расходов по фото чеков: позиции, категории, бюджеты и аналитика",
+ "id": "./",
+ "start_url": "./",
+ "scope": "./",
+ "display": "standalone",
+ "orientation": "portrait",
+ "background_color": "#EEF1F6",
+ "theme_color": "#3B5BFF",
+ "lang": "ru",
+ "categories": [
+  "finance",
+  "productivity"
+ ],
+ "icons": [
+  {
+   "src": "icon-192.png",
+   "sizes": "192x192",
+   "type": "image/png",
+   "purpose": "any"
+  },
+  {
+   "src": "icon-512.png",
+   "sizes": "512x512",
+   "type": "image/png",
+   "purpose": "any"
+  },
+  {
+   "src": "icon-maskable-512.png",
+   "sizes": "512x512",
+   "type": "image/png",
+   "purpose": "maskable"
+  }
+ ]
+}
